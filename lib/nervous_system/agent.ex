@@ -323,16 +323,35 @@ defmodule NervousSystem.Agent do
     provider_mod = @providers[state.provider]
     system_prompt = @personalities[state.personality].system_prompt
 
-    # Start streaming
-    task = provider_mod.stream(messages, [
+    provider_opts = [
       system: system_prompt,
       model: state.model
-    ] ++ opts)
+    ] ++ opts
 
-    state = %{state | status: :speaking, current_task: task}
-    notify_room(state, {:agent_status, state.id, :speaking})
-
-    {:noreply, state}
+    # Fact checker uses non-streaming (no UX benefit, simpler implementation)
+    if state.personality == :fact_checker do
+      # Use synchronous chat - spawn a task to not block the GenServer
+      caller = self()
+      task = Task.async(fn ->
+        case provider_mod.chat(messages, provider_opts) do
+          {:ok, response} ->
+            send(caller, {:stream_done, response})
+            response
+          {:error, reason} ->
+            send(caller, {:stream_error, reason})
+            ""
+        end
+      end)
+      state = %{state | status: :speaking, current_task: task}
+      notify_room(state, {:agent_status, state.id, :speaking})
+      {:noreply, state}
+    else
+      # Other agents use streaming for better UX
+      task = provider_mod.stream(messages, provider_opts)
+      state = %{state | status: :speaking, current_task: task}
+      notify_room(state, {:agent_status, state.id, :speaking})
+      {:noreply, state}
+    end
   end
 
   @impl true

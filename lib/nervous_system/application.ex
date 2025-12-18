@@ -13,6 +13,12 @@ defmodule NervousSystem.Application do
       {Phoenix.PubSub, name: NervousSystem.PubSub},
       # Registry for looking up Room processes by ID
       {Registry, keys: :unique, name: NervousSystem.RoomRegistry},
+      # DynamicSupervisor for Room processes - provides fault tolerance
+      {DynamicSupervisor, name: NervousSystem.RoomSupervisor, strategy: :one_for_one},
+      # DynamicSupervisor for Agent processes - provides fault tolerance
+      {DynamicSupervisor, name: NervousSystem.AgentSupervisor, strategy: :one_for_one},
+      # TaskSupervisor for async tasks like evaluation - provides fault tolerance
+      {Task.Supervisor, name: NervousSystem.TaskSupervisor},
       # Start to serve requests, typically the last entry
       NervousSystemWeb.Endpoint
     ]

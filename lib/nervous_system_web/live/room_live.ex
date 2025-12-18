@@ -78,8 +78,11 @@ defmodule NervousSystemWeb.RoomLive do
 
   @impl true
   def handle_event("create_room", %{"topic" => topic}, socket) do
-    # Create a new room and start deliberation
-    {:ok, room_pid} = Room.start_link([])
+    # Create a new room under the DynamicSupervisor for fault tolerance
+    {:ok, room_pid} = DynamicSupervisor.start_child(
+      NervousSystem.RoomSupervisor,
+      {Room, []}
+    )
     room_state = Room.get_state(room_pid)
     room_id = room_state.id
 
@@ -175,9 +178,8 @@ defmodule NervousSystemWeb.RoomLive do
     personality = socket.assigns.streaming_message[:personality]
 
     # Skip adding Fact Checker messages to main chat - they appear as fact_check completions instead
-    # Check by agent_name since Fact Checker runs async and streaming_message may have stale personality
+    # Fact Checker uses non-streaming chat(), so don't touch streaming_message (another agent may be streaming)
     if agent_name == "The Fact Checker" do
-      socket = assign(socket, :streaming_message, nil)
       {:noreply, socket}
     else
       # Add completed message to list for other agents
@@ -268,12 +270,17 @@ defmodule NervousSystemWeb.RoomLive do
 
   @impl true
   def handle_info({:fact_check_queued, queue_item}, socket) do
+    require Logger
+    Logger.debug("📥 LIVEVIEW: Received fact_check_queued for #{queue_item.id}")
     socket = update(socket, :fact_check_queue, &(&1 ++ [queue_item]))
+    Logger.debug("📥 LIVEVIEW: Queue now has #{length(socket.assigns.fact_check_queue)} items")
     {:noreply, socket}
   end
 
   @impl true
   def handle_info({:fact_check_complete, completed_item}, socket) do
+    require Logger
+    Logger.debug("📥 LIVEVIEW: Received fact_check_complete for #{completed_item.id} with status #{completed_item.status}")
     # Update the queue item status
     socket = update(socket, :fact_check_queue, fn queue ->
       Enum.map(queue, fn item ->
@@ -284,6 +291,7 @@ defmodule NervousSystemWeb.RoomLive do
         end
       end)
     end)
+    Logger.debug("📥 LIVEVIEW: Updated queue, statuses now: #{inspect(Enum.map(socket.assigns.fact_check_queue, & &1.status))}")
 
     # Also add a fact-check message to the main chat
     message = %{
@@ -362,16 +370,16 @@ defmodule NervousSystemWeb.RoomLive do
             <!-- Agent Status Bar -->
             <div class="flex justify-center gap-4 flex-wrap">
               <.agent_badge
-                :for={{personality, _} <- (@room && @room.agents) || []}
-                personality={personality}
-                active={@room && @room.current_speaker == personality}
+                :for={agent <- (@room && @room.agents) || []}
+                personality={agent.personality}
+                active={@room && @room.current_speaker == agent.personality}
               />
             </div>
 
             <!-- Two-column layout: Main thread + Fact Check Sidebar -->
-            <div class="flex gap-6 items-start">
+            <div class="flex gap-6 items-start overflow-hidden">
               <!-- Main Thread (left column) -->
-              <div class="flex-1 space-y-4">
+              <div class="flex-1 min-w-0 space-y-4">
                 <!-- Messages -->
                 <div class="bg-gray-800 rounded-lg p-4 min-h-[500px] max-h-[700px] overflow-y-auto" id="messages" phx-hook="ScrollToBottom">
                   <div class="space-y-4">
@@ -400,7 +408,19 @@ defmodule NervousSystemWeb.RoomLive do
 
                   <!-- Quality Report -->
                   <%= if @evaluation do %>
-                    <.quality_report evaluation={@evaluation} />
+                    <%= if @evaluation.status == :error do %>
+                      <div class="bg-red-900/30 border border-red-500/30 rounded-lg p-4 mt-4">
+                        <div class="flex items-center gap-2 text-red-400">
+                          <span>⚠️</span>
+                          <span class="font-medium">Evaluation Failed</span>
+                        </div>
+                        <p class="text-gray-400 text-sm mt-2">
+                          <%= @evaluation.details[:error] || "Unable to evaluate discussion quality" %>
+                        </p>
+                      </div>
+                    <% else %>
+                      <.quality_report evaluation={@evaluation} />
+                    <% end %>
                   <% else %>
                     <div class="bg-gray-800 rounded-lg p-4 mt-4">
                       <div class="flex items-center gap-2 text-gray-400">
@@ -489,7 +509,7 @@ defmodule NervousSystemWeb.RoomLive do
                           <%= if item.status == :complete && item.result do %>
                             <details class="mt-2">
                               <summary class="text-xs text-teal-400 cursor-pointer hover:text-teal-300">View details</summary>
-                              <div class="mt-1 text-xs text-gray-400 max-h-40 overflow-y-auto whitespace-pre-wrap">
+                              <div class="mt-1 text-xs text-gray-400 max-h-40 overflow-y-auto whitespace-pre-wrap break-words">
                                 <%= String.slice(item.result, 0..600) %><%= if String.length(item.result || "") > 600, do: "..." %>
                               </div>
                             </details>
@@ -637,9 +657,9 @@ defmodule NervousSystemWeb.RoomLive do
           </div>
       <% end %>
       <%= if @message.type == :fact_check do %>
-        <div class="text-gray-200 whitespace-pre-wrap"><%= @message.result %></div>
+        <div class="text-gray-200 whitespace-pre-wrap break-words overflow-hidden"><%= @message.result %></div>
       <% else %>
-        <div class="text-gray-200 whitespace-pre-wrap"><%= @message.content %><%= if @message[:streaming], do: "▊" %></div>
+        <div class="text-gray-200 whitespace-pre-wrap break-words overflow-hidden"><%= @message.content %><%= if @message[:streaming], do: "▊" %></div>
       <% end %>
     </div>
     """
@@ -705,17 +725,14 @@ defmodule NervousSystemWeb.RoomLive do
   defp verdict_emoji(:unverifiable), do: "?"
   defp verdict_emoji(_), do: "?"
 
-  # Fact check status helpers
-  defp fact_check_status_icon(:checking), do: "⏳"
-  defp fact_check_status_icon(:complete), do: "✅"
-  defp fact_check_status_icon(_), do: "📋"
-
   # Verdict-based styling (used when status is complete)
   defp verdict_bg(:verified, :complete), do: "bg-green-500/10 border border-green-500/30"
   defp verdict_bg(:partial, :complete), do: "bg-yellow-500/10 border border-yellow-500/30"
   defp verdict_bg(:disputed, :complete), do: "bg-red-500/10 border border-red-500/30"
   defp verdict_bg(:false, :complete), do: "bg-red-500/15 border border-red-500/40"
   defp verdict_bg(:unverifiable, :complete), do: "bg-gray-500/10 border border-gray-500/30"
+  defp verdict_bg(:unknown, :complete), do: "bg-blue-500/10 border border-blue-500/30"
+  defp verdict_bg(_, :complete), do: "bg-teal-500/10 border border-teal-500/30"
   defp verdict_bg(_, :checking), do: "bg-yellow-500/10 border border-yellow-500/20 animate-pulse"
   defp verdict_bg(_, _), do: "bg-gray-500/10 border border-gray-500/20"
 
@@ -724,6 +741,8 @@ defmodule NervousSystemWeb.RoomLive do
   defp verdict_icon(:disputed, :complete), do: "✗"
   defp verdict_icon(:false, :complete), do: "✗"
   defp verdict_icon(:unverifiable, :complete), do: "?"
+  defp verdict_icon(:unknown, :complete), do: "●"
+  defp verdict_icon(_, :complete), do: "✓"
   defp verdict_icon(_, :checking), do: "⏳"
   defp verdict_icon(_, _), do: "○"
 
@@ -732,6 +751,8 @@ defmodule NervousSystemWeb.RoomLive do
   defp verdict_badge(:disputed, :complete), do: "bg-red-500/20 text-red-400"
   defp verdict_badge(:false, :complete), do: "bg-red-500/30 text-red-400"
   defp verdict_badge(:unverifiable, :complete), do: "bg-gray-500/20 text-gray-400"
+  defp verdict_badge(:unknown, :complete), do: "bg-blue-500/20 text-blue-400"
+  defp verdict_badge(_, :complete), do: "bg-teal-500/20 text-teal-400"
   defp verdict_badge(_, :checking), do: "bg-yellow-500/20 text-yellow-300"
   defp verdict_badge(_, _), do: "bg-gray-500/20 text-gray-400"
 
@@ -740,6 +761,8 @@ defmodule NervousSystemWeb.RoomLive do
   defp verdict_label(:disputed, :complete), do: "DISPUTED"
   defp verdict_label(:false, :complete), do: "FALSE"
   defp verdict_label(:unverifiable, :complete), do: "UNVERIFIABLE"
+  defp verdict_label(:unknown, :complete), do: "REVIEWED"
+  defp verdict_label(_, :complete), do: "COMPLETE"
   defp verdict_label(_, :checking), do: "CHECKING..."
   defp verdict_label(_, _), do: "PENDING"
 

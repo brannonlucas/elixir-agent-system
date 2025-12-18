@@ -36,7 +36,6 @@ defmodule NervousSystem.Room do
     agent_turn_counts: %{}  # Track turns per agent {personality => count}
   ]
 
-  @phases [:framework, :discussion, :synthesis]
   @max_discussion_turns 18  # 2 rounds per agent before forced conclusion (9 agents)
   @max_framework_turns 4    # Quick framework establishment
   @max_agent_turns 3        # Maximum turns any single agent can take
@@ -280,14 +279,24 @@ defmodule NervousSystem.Room do
         Logger.info("🏁 BRANCH: Synthesis complete → stopping")
         broadcast(state, {:deliberation_stopped, "Synthesis complete. Discussion concluded."})
 
-        # Trigger async evaluation
+        # Trigger async evaluation under TaskSupervisor for fault tolerance
         room_id = state.id
         messages = state.messages
         topic = state.topic
-        Task.start(fn ->
+        Task.Supervisor.start_child(NervousSystem.TaskSupervisor, fn ->
           Logger.info("📊 EVALUATOR: Starting async evaluation...")
-          evaluation = Evaluator.evaluate(messages, topic)
-          PubSub.broadcast(@pubsub, "room:#{room_id}", {:evaluation_complete, evaluation})
+          try do
+            evaluation = Evaluator.evaluate(messages, topic)
+            PubSub.broadcast(@pubsub, "room:#{room_id}", {:evaluation_complete, evaluation})
+          rescue
+            e ->
+              Logger.error("📊 EVALUATOR: Failed with error: #{inspect(e)}")
+              error_evaluation = %NervousSystem.Evaluator{
+                status: :error,
+                details: %{error: "Evaluation failed: #{Exception.message(e)}"}
+              }
+              PubSub.broadcast(@pubsub, "room:#{room_id}", {:evaluation_complete, error_evaluation})
+          end
         end)
 
         %{state | stopped: true, phase: :stopped}
@@ -374,7 +383,11 @@ defmodule NervousSystem.Room do
       ]
       opts = if model, do: Keyword.put(opts, :model, model), else: opts
 
-      {:ok, pid} = Agent.start_link(opts)
+      # Start agents under the AgentSupervisor for fault tolerance
+      {:ok, pid} = DynamicSupervisor.start_child(
+        NervousSystem.AgentSupervisor,
+        {Agent, opts}
+      )
 
       agent_state = Agent.get_state(pid)
       {personality, %{pid: pid, name: agent_state.name, status: :idle}}
@@ -677,6 +690,7 @@ defmodule NervousSystem.Room do
     if fact_checker do
       # Generate unique ID for this fact-check request
       check_id = :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
+      Logger.debug("🔍 QUEUE_FACT_CHECK: Creating item #{check_id} for #{source_agent} with #{length(claims)} claims")
 
       claims_text = claims |> Enum.with_index(1) |> Enum.map(fn {claim, idx} ->
         "#{idx}. \"#{String.trim(claim)}\""
@@ -711,6 +725,7 @@ defmodule NervousSystem.Room do
       new_queue = state.fact_check_queue ++ [queue_item]
 
       # Broadcast queue update
+      Logger.debug("🔍 QUEUE_FACT_CHECK: Broadcasting queued item #{check_id}, queue size now #{length(new_queue)}")
       broadcast(state, {:fact_check_queued, queue_item})
 
       # Trigger the fact checker (this runs async via the agent's Task)
@@ -724,18 +739,25 @@ defmodule NervousSystem.Room do
 
   defp complete_fact_check(state, response) do
     # Find the oldest pending/checking item and mark it complete
+    queue_statuses = Enum.map(state.fact_check_queue, &(&1.status))
+    Logger.debug("🔍 COMPLETE_FACT_CHECK: Queue has #{length(state.fact_check_queue)} items with statuses: #{inspect(queue_statuses)}")
+
     case Enum.find_index(state.fact_check_queue, &(&1.status == :checking)) do
       nil ->
+        Logger.warning("🔍 COMPLETE_FACT_CHECK: No :checking item found in queue!")
         state
 
       idx ->
         {completed_item, rest} = List.pop_at(state.fact_check_queue, idx)
+        Logger.debug("🔍 COMPLETE_FACT_CHECK: Raw response (first 500 chars): #{String.slice(response, 0, 500)}")
         verdict = parse_verdict(response)
+        Logger.debug("🔍 COMPLETE_FACT_CHECK: Completing item #{completed_item.id} with verdict #{verdict}")
         completed_item = %{completed_item | status: :complete, result: response, verdict: verdict}
 
         # Keep completed items for display (limit to last 10)
         completed_queue = (rest ++ [completed_item]) |> Enum.take(-10)
 
+        Logger.debug("🔍 COMPLETE_FACT_CHECK: Broadcasting completion for #{completed_item.id}")
         broadcast(state, {:fact_check_complete, completed_item})
 
         state = %{state | fact_check_queue: completed_queue}
@@ -752,28 +774,49 @@ defmodule NervousSystem.Room do
   end
 
   # Parse verdict from fact-check response
-  # Looks for patterns like "STATUS: VERIFIED", "STATUS: DISPUTED", etc.
+  # Looks for patterns like "VERIFIED", "DISPUTED", etc. in various formats
   defp parse_verdict(response) do
     response_upper = String.upcase(response)
 
     cond do
+      # Verified patterns
+      String.contains?(response_upper, "VERIFIED ✓") or
+      String.contains?(response_upper, "VERIFIED✓") or
+      String.contains?(response_upper, "✓ VERIFIED") or
       String.contains?(response_upper, "STATUS: VERIFIED") or
-      String.contains?(response_upper, "STATUS:** VERIFIED") ->
+      String.contains?(response_upper, "**VERIFIED**") or
+      Regex.match?(~r/\bVERIFIED\b/, response_upper) ->
         :verified
 
-      String.contains?(response_upper, "PARTIALLY VERIFIED") ->
+      # Partial patterns
+      String.contains?(response_upper, "PARTIALLY") or
+      String.contains?(response_upper, "PARTIAL") or
+      String.contains?(response_upper, "⚠") ->
         :partial
 
+      # Disputed patterns
+      String.contains?(response_upper, "DISPUTED ⚠") or
+      String.contains?(response_upper, "DISPUTED⚠") or
+      String.contains?(response_upper, "⚠️ DISPUTED") or
       String.contains?(response_upper, "STATUS: DISPUTED") or
-      String.contains?(response_upper, "STATUS:** DISPUTED") ->
+      String.contains?(response_upper, "**DISPUTED**") or
+      Regex.match?(~r/\bDISPUTED\b/, response_upper) ->
         :disputed
 
+      # False patterns
+      String.contains?(response_upper, "FALSE ✗") or
+      String.contains?(response_upper, "FALSE✗") or
+      String.contains?(response_upper, "✗ FALSE") or
       String.contains?(response_upper, "STATUS: FALSE") or
-      String.contains?(response_upper, "STATUS:** FALSE") ->
+      String.contains?(response_upper, "**FALSE**") or
+      Regex.match?(~r/\bFALSE\b/, response_upper) ->
         :false
 
+      # Unverifiable patterns
       String.contains?(response_upper, "UNVERIFIABLE") or
-      String.contains?(response_upper, "CANNOT BE VERIFIED") ->
+      String.contains?(response_upper, "CANNOT BE VERIFIED") or
+      String.contains?(response_upper, "UNABLE TO VERIFY") or
+      String.contains?(response_upper, "NOT VERIFIABLE") ->
         :unverifiable
 
       true ->

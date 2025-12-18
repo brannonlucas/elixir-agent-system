@@ -11,7 +11,34 @@ defmodule NervousSystem.MixProject do
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+
+      # Docs
+      name: "NervousSystem",
+      source_url: "https://github.com/brannonlucas/elixir-agent-system",
+      homepage_url: "https://github.com/brannonlucas/elixir-agent-system",
+      docs: [
+        main: "readme",
+        extras: ["README.md", "DEPLOYMENT.md"],
+        groups_for_modules: [
+          "Core": [
+            NervousSystem.Room,
+            NervousSystem.Agent,
+            NervousSystem.Evaluator
+          ],
+          "Providers": [
+            NervousSystem.Provider,
+            NervousSystem.Providers.Anthropic,
+            NervousSystem.Providers.OpenAI,
+            NervousSystem.Providers.Google,
+            NervousSystem.Providers.Perplexity
+          ],
+          "Web": [
+            NervousSystemWeb,
+            NervousSystemWeb.RoomLive
+          ]
+        ]
+      ]
     ]
   end
 
@@ -61,7 +88,9 @@ defmodule NervousSystem.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       # HTTP client for LLM API calls
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      # Documentation
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
     ]
   end
 

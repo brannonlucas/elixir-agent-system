@@ -35,3 +35,7 @@ nervous_system-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Environment variables (API keys, secrets)
+.env
+.env.*
+!.env.example

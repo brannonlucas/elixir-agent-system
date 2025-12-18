@@ -61,15 +61,144 @@ defmodule NervousSystem.Providers.Perplexity do
     caller = self()
 
     Task.async(fn ->
-      case chat(messages, opts) do
-        {:ok, response} ->
-          send(caller, {:stream_chunk, response})
-          send(caller, {:stream_done, response})
-          response
-
-        {:error, reason} ->
-          send(caller, {:stream_error, reason})
+      case api_key() do
+        nil ->
+          send(caller, {:stream_error, {:missing_api_key, "PERPLEXITY_API_KEY not configured"}})
           ""
+
+        key ->
+          model = Keyword.get(opts, :model) || default_model()
+          system = Keyword.get(opts, :system)
+
+          formatted_messages = format_messages(messages, system)
+
+          body = %{
+            model: model,
+            stream: true,
+            return_citations: true,
+            messages: formatted_messages
+          }
+
+          # Use process dictionary to track streaming state
+          Process.put(:stream_buffer, "")
+          Process.put(:stream_response, "")
+          Process.put(:stream_citations, [])
+
+          require Logger
+          Logger.debug("🔬 PERPLEXITY: Starting stream request")
+
+          result =
+            Req.post(@api_url,
+              json: body,
+              headers: headers(key),
+              receive_timeout: 120_000,
+              into: fn {:data, chunk}, {req, resp} ->
+                Logger.debug("🔬 PERPLEXITY: Received chunk of #{byte_size(chunk)} bytes")
+                # Log first chunk sample to see format
+                if Process.get(:stream_response, "") == "" do
+                  Logger.debug("🔬 PERPLEXITY: First chunk sample: #{String.slice(chunk, 0, 500)}")
+                end
+                buffer = Process.get(:stream_buffer, "")
+                full_response = Process.get(:stream_response, "")
+                citations = Process.get(:stream_citations, [])
+
+                # Process SSE data and extract text deltas
+                {new_buffer, texts, new_citations} = parse_sse_events(buffer <> chunk)
+                new_full_response = full_response <> Enum.join(texts, "")
+                all_citations = citations ++ new_citations
+
+                Logger.debug("🔬 PERPLEXITY: Extracted #{length(texts)} text chunks, response now #{byte_size(new_full_response)} bytes")
+
+                Process.put(:stream_buffer, new_buffer)
+                Process.put(:stream_response, new_full_response)
+                Process.put(:stream_citations, all_citations)
+
+                # Send each text chunk to the caller
+                Enum.each(texts, fn text ->
+                  if text != "", do: send(caller, {:stream_chunk, text})
+                end)
+
+                {:cont, {req, resp}}
+              end
+            )
+
+          Logger.debug("🔬 PERPLEXITY: Request complete, result status: #{inspect(elem(result, 0))}")
+
+          full_response = Process.get(:stream_response, "")
+          citations = Process.get(:stream_citations, [])
+
+          case result do
+            {:ok, %{status: 200}} ->
+              # Append citations to the response if available
+              final_response =
+                if length(citations) > 0 do
+                  citation_text = format_citations(Enum.uniq(citations))
+                  full_response <> "\n\n" <> citation_text
+                else
+                  full_response
+                end
+
+              send(caller, {:stream_done, final_response})
+              final_response
+
+            {:ok, %{status: status, body: body}} ->
+              send(caller, {:stream_error, {:api_error, status, body}})
+              ""
+
+            {:error, reason} ->
+              send(caller, {:stream_error, reason})
+              ""
+          end
+      end
+    end)
+  end
+
+  # Parse SSE events from raw data, returning remaining buffer, extracted texts, and citations
+  defp parse_sse_events(data) do
+    # SSE events are separated by double newlines
+    parts = String.split(data, "\n\n", trim: false)
+
+    case parts do
+      [single] ->
+        # No complete event yet, keep buffering
+        {single, [], []}
+
+      events ->
+        # Last part may be incomplete
+        {buffer, complete} = List.pop_at(events, -1)
+        {texts, citations} = extract_content_from_events(complete)
+        {buffer || "", texts, citations}
+    end
+  end
+
+  # Extract text content and citations from SSE events (Perplexity uses OpenAI-like format)
+  defp extract_content_from_events(events) do
+    Enum.reduce(events, {[], []}, fn event, {texts_acc, citations_acc} ->
+      {texts, citations} = extract_from_event(event)
+      {texts_acc ++ texts, citations_acc ++ citations}
+    end)
+  end
+
+  defp extract_from_event(event) do
+    event
+    |> String.split("\n", trim: true)
+    |> Enum.filter(&String.starts_with?(&1, "data: "))
+    |> Enum.reduce({[], []}, fn line, {texts, citations} ->
+      json = String.trim_leading(line, "data: ")
+
+      # Perplexity sends "[DONE]" as final message
+      if json == "[DONE]" do
+        {texts, citations}
+      else
+        case Jason.decode(json) do
+          {:ok, %{"choices" => [%{"delta" => %{"content" => text}} | _]} = data} ->
+            # Extract citations if present in this chunk
+            new_citations = Map.get(data, "citations", [])
+            {texts ++ [text], citations ++ new_citations}
+
+          _ ->
+            {texts, citations}
+        end
       end
     end)
   end

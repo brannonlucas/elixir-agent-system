@@ -179,11 +179,26 @@ defmodule NervousSystem.Evaluator do
     end
   end
 
+  # Known evaluation keys - only convert these to atoms to prevent atom table exhaustion
+  @known_detail_keys ~w(engagement evidence diversity context_integration actionability synthesis fact_checking conciseness)
+
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn {k, v} ->
-      key = if is_binary(k), do: String.to_atom(k), else: k
+      key = safe_to_atom(k)
       {key, v}
     end)
   end
   defp atomize_keys(other), do: other
+
+  # Safely convert string keys to atoms, only for known keys
+  defp safe_to_atom(k) when is_binary(k) do
+    if k in @known_detail_keys do
+      String.to_existing_atom(k)
+    else
+      k
+    end
+  rescue
+    ArgumentError -> k
+  end
+  defp safe_to_atom(k), do: k
 end

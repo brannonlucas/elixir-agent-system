@@ -32,7 +32,15 @@ const Hooks = {
       this.scrollToBottom()
     },
     updated() {
-      this.scrollToBottom()
+      // Only auto-scroll if user is already near the bottom (within 150px)
+      // This prevents yanking the view during streaming if user scrolled up to read
+      if (this.isNearBottom()) {
+        this.scrollToBottom()
+      }
+    },
+    isNearBottom() {
+      const threshold = 150
+      return this.el.scrollTop + this.el.clientHeight >= this.el.scrollHeight - threshold
     },
     scrollToBottom() {
       this.el.scrollTop = this.el.scrollHeight
