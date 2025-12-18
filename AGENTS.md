@@ -1,5 +1,31 @@
 This is a web application written using the Phoenix web framework.
 
+## Project Overview
+
+**NervousSystem** is a multi-agent AI deliberation platform that orchestrates conversations between 9 specialized AI agents (Analyst, Advocate, Skeptic, Historian, Futurist, Pragmatist, Ethicist, Synthesizer, Fact Checker) to explore topics from diverse perspectives.
+
+### Core Architecture
+
+- **`NervousSystem.Room`** - GenServer orchestrating deliberations (phases, turn-taking, PubSub broadcasting)
+- **`NervousSystem.Agent`** - GenServer representing an AI agent with personality and provider
+- **`NervousSystem.Provider`** - Behaviour defining LLM provider contract
+- **`NervousSystem.Evaluator`** - Scores deliberation quality across 8 dimensions
+- **`NervousSystem.Providers.*`** - Implementations for Anthropic, OpenAI, Google, Perplexity
+
+### Key Patterns
+
+- Agents nominate who speaks next ("I'd like to hear from [Agent1] and [Agent2]")
+- Discussion phases: framework → discussion → synthesis
+- Streaming responses via Phoenix PubSub to LiveView
+- Each agent maintains conversation memory
+
+### Environment Variables
+
+- `ANTHROPIC_API_KEY` - Claude API
+- `OPENAI_API_KEY` - GPT API
+- `GEMINI_API_KEY` - Google Gemini API
+- `PERPLEXITY_API_KEY` - Perplexity Sonar API (for fact checking)
+
 ## Project guidelines
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
