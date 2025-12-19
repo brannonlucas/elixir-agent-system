@@ -9,6 +9,7 @@ defmodule NervousSystemWeb.RoomLive do
   use NervousSystemWeb, :live_view
 
   alias NervousSystem.Room
+  alias NervousSystemWeb.Markdown
 
   @impl true
   def mount(params, _session, socket) do
@@ -657,9 +658,9 @@ defmodule NervousSystemWeb.RoomLive do
           </div>
       <% end %>
       <%= if @message.type == :fact_check do %>
-        <div class="text-gray-200 whitespace-pre-wrap break-words overflow-hidden"><%= @message.result %></div>
+        <div class="prose-chat break-words overflow-hidden"><%= Markdown.render(@message.result) %></div>
       <% else %>
-        <div class="text-gray-200 whitespace-pre-wrap break-words overflow-hidden"><%= @message.content %><%= if @message[:streaming], do: "▊" %></div>
+        <div class="prose-chat break-words overflow-hidden"><%= Markdown.render(@message.content) %><%= if @message[:streaming], do: raw("<span class=\"animate-pulse\">▊</span>") %></div>
       <% end %>
     </div>
     """

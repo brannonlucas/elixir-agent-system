@@ -85,6 +85,8 @@ defmodule NervousSystem.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
+      # Markdown parsing for agent response rendering
+      {:earmark, "~> 1.4"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       # HTTP client for LLM API calls
